@@ -2,6 +2,7 @@ package recipes
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -135,7 +136,7 @@ func NewInterProcessMutexWithDriver(client curator.CuratorFramework, path string
 }
 
 func (m *InterProcessMutex) Acquire() (bool, error) {
-	if locked, err := m.internalLock(-1); err != nil {
+	if locked, err := m.internalLock(math.MinInt64); err != nil {
 		return false, err
 	} else if !locked {
 		return false, fmt.Errorf("Lost connection while trying to acquire lock: %s", m.basePath)
@@ -278,18 +279,33 @@ func (l *lockInternals) internalLockLoop(startTime time.Time, waitTime time.Dura
 
 				c := make(chan error)
 
-				t := time.NewTimer(waitTime - time.Now().Sub(startTime))
-
 				l.client.GetData().UsingWatcher(curator.NewWatcher(func(event *zk.Event) {
 					c <- event.Err
 				})).ForPath(previousSequencePath)
 
-				select {
-				case err := <-c:
+				if waitTime != math.MinInt64 {
+					waitTime -= time.Now().Sub(startTime)
+					startTime = time.Now()
+					if waitTime <= 0 {
+						doDelete = true // timed out - delete our node
+						break
+					}
+
+					t := time.NewTimer(waitTime)
+
+					select {
+					case err = <-c:
+					case <-t.C:
+					}
+
 					if err != nil && err != zk.ErrNoNode {
 						break
 					}
-				case <-t.C:
+				} else {
+					err := <-c
+					if err != nil && err != zk.ErrNoNode {
+						break
+					}
 				}
 			}
 		}
